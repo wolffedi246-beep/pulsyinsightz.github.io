@@ -10,7 +10,7 @@ from telegram import Bot, ParseMode
 # -------------------------
 # إعدادات البوت
 # -------------------------
-TELEGRAM_TOKEN = 'PUT_YOUR_TELEGRAM_TOKEN_HERE'
+TELEGRAM_TOKEN = TOKEN = "8265838954:AAGYErErtLRCgqmAun-H0Ay1gHM2Yiu7VnU"
 ADMIN_USER_ID = 5146822753
 GROUP_ID = '@pulsyinsightz'
 bot = Bot(token=TELEGRAM_TOKEN)
