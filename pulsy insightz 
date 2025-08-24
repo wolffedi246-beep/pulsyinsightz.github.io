@@ -1,0 +1,212 @@
+# -------------------------
+# bot_flask.py
+# -------------------------
+import time
+import requests
+import feedparser
+from flask import Flask, request, render_template_string, redirect, url_for
+from telegram import Bot, ParseMode
+
+# -------------------------
+# إعدادات البوت
+# -------------------------
+TELEGRAM_TOKEN = TOKEN = "8265838954:AAGYErErtLRCgqmAun-H0Ay1gHM2Yiu7VnU"
+ADMIN_USER_ID = 5146822753
+GROUP_ID = '@pulsyinsightz'
+bot = Bot(token=TELEGRAM_TOKEN)
+
+# -------------------------
+# بيانات التداول
+# -------------------------
+SYMBOLS = ['EURUSD', 'GBPUSD', 'XAUUSD', 'NASDAQ', 'DOW', 'WTI']
+PRICE_UPDATE_INTERVAL = 900  # كل 15 دقيقة
+NEWS_UPDATE_INTERVAL = 60    # كل دقيقة
+sent_news = set()
+alerts_enabled = True
+
+# -------------------------
+# Flask Web App
+# -------------------------
+app = Flask(__name__)
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head><title>Pulsy Insightz Admin</title></head>
+<body>
+<h2>⚡ Pulsy Insightz Control Panel ⚡</h2>
+
+<h3>الرموز الحالية:</h3>
+<ul>
+{% for symbol in symbols %}
+<li>{{ symbol }}</li>
+{% endfor %}
+</ul>
+
+<h3>إضافة رمز جديد:</h3>
+<form method="post" action="/add_symbol">
+<input type="text" name="symbol" placeholder="مثال: USDJPY">
+<input type="submit" value="إضافة">
+</form>
+
+<h3>إزالة رمز:</h3>
+<form method="post" action="/remove_symbol">
+<input type="text" name="symbol" placeholder="مثال: XAUUSD">
+<input type="submit" value="حذف">
+</form>
+
+<h3>تنبيهات التحركات القوية:</h3>
+<p>الحالة الحالية: {{ 'مفعلة' if alerts else 'معطلة' }}</p>
+<form method="post" action="/toggle_alerts">
+<input type="submit" value="تبديل الحالة">
+</form>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE, symbols=SYMBOLS, alerts=alerts_enabled)
+
+@app.route('/add_symbol', methods=['POST'])
+def add_symbol():
+    symbol = request.form.get('symbol').upper()
+    if symbol and symbol not in SYMBOLS:
+        SYMBOLS.append(symbol)
+    return redirect(url_for('index'))
+
+@app.route('/remove_symbol', methods=['POST'])
+def remove_symbol():
+    symbol = request.form.get('symbol').upper()
+    if symbol in SYMBOLS:
+        SYMBOLS.remove(symbol)
+    return redirect(url_for('index'))
+
+@app.route('/toggle_alerts', methods=['POST'])
+def toggle_alerts():
+    global alerts_enabled
+    alerts_enabled = not alerts_enabled
+    return redirect(url_for('index'))
+
+# -------------------------
+# وظائف البوت
+# -------------------------
+def send_message(message):
+    try:
+        bot.send_message(chat_id=GROUP_ID, text=message, parse_mode=ParseMode.HTML)
+    except Exception as e:
+        print(f"Error sending message: {e}")
+
+def get_price(symbol):
+    try:
+        url = f'https://api.twelvedata.com/time_series?symbol={symbol}&interval=1min&apikey=YOUR_TWELVEDATA_API_KEY&outputsize=1'
+        r = requests.get(url)
+        r.raise_for_status()
+        data = r.json()['values'][0]
+        return {
+            'open': float(data['open']),
+            'close': float(data['close']),
+            'high': float(data['high']),
+            'low': float(data['low']),
+            'support': round(float(data['low']) - 0.005, 5),
+            'resistance': round(float(data['high']) + 0.005, 5)
+        }
+    except Exception as e:
+        print(f"Error fetching price for {symbol}: {e}")
+        return None
+
+def get_rsi(symbol):
+    try:
+        url = f'https://api.twelvedata.com/rsi?symbol={symbol}&interval=1h&time_period=14&apikey=YOUR_TWELVEDATA_API_KEY'
+        r = requests.get(url).json()
+        if 'values' in r:
+            rsi = float(r['values'][0]['rsi'])
+            if rsi > 70:
+                return "⚠️ تشبع شرائي"
+            elif rsi < 30:
+                return "⚠️ تشبع بيعي"
+        return ""
+    except:
+        return ""
+
+def price_task():
+    for symbol in SYMBOLS:
+        data = get_price(symbol)
+        if data:
+            rsi_signal = get_rsi(symbol)
+            msg = (
+                f"<b>{symbol}</b>\nOpen: {data['open']}, Close: {data['close']}, "
+                f"High: {data['high']}, Low: {data['low']}\n"
+                f"Support: {data['support']}, Resistance: {data['resistance']} {rsi_signal}\n"
+                f"<i>pulsy insightz</i>"
+            )
+            send_message(msg)
+
+def hourly_summary():
+    msg = "<b>ملخص الساعة</b>\n"
+    for symbol in SYMBOLS:
+        data = get_price(symbol)
+        if data:
+            rsi_signal = get_rsi(symbol)
+            move = abs(data['close'] - data['open']) / data['open'] * 100
+            strong_move = "🚀 تحرك قوي!" if alerts_enabled and move >= 1 else ""
+            msg += (
+                f"{symbol}: Open {data['open']}, Close {data['close']}, "
+                f"Support {data['support']}, Resistance {data['resistance']} {rsi_signal} {strong_move}\n"
+            )
+    msg += "<i>pulsy insightz</i>"
+    send_message(msg)
+
+NEWS_SOURCES = [
+    'https://www.investing.com/rss/news_1.rss',
+    'https://news.google.com/rss/search?q=forex+OR+gold+OR+stocks&hl=en-US&gl=US&ceid=US:en'
+]
+
+def news_task():
+    global sent_news
+    for rss_url in NEWS_SOURCES:
+        feed = feedparser.parse(rss_url)
+        for entry in feed.entries[:5]:
+            news_id = entry.id if 'id' in entry else entry.link
+            if news_id not in sent_news:
+                important_keywords = ['cpi','nfp','fed','eu central bank','treasury','unemployment','interest rate','gold','oil']
+                if any(keyword in entry.title.lower() for keyword in important_keywords):
+                    send_message(f"⚠️ تنبيه قبل صدور الخبر: {entry.title}\n<i>pulsy insightz</i>")
+                    send_message(f"💡 توقع تأثير على السوق: متابعة متقدمة للمتداولين.\n<i>pulsy insightz</i>")
+                send_message(f"📰 {entry.title}\n{entry.link}\n<i>pulsy insightz</i>")
+                sent_news.add(news_id)
+
+def session_alert():
+    msg = (
+        "📢 جلسة التداول اليوم: تابع تحركات الذهب، الدولار، والمؤشرات العالمية.\n"
+        "💡 استعد جيدًا وركز على فرص السوق.\n"
+        "<i>pulsy insightz</i>"
+    )
+    send_message(msg)
+
+# -------------------------
+# تشغيل البوت + Flask
+# -------------------------
+if __name__ == "__main__":
+    from threading import Thread
+
+    # تشغيل Flask في Thread
+    Thread(target=lambda: app.run(host='0.0.0.0', port=5000)).start()
+
+    last_news_update = 0
+    last_hourly_summary = 0
+
+    while True:
+        try:
+            price_task()
+            if time.time() - last_news_update > NEWS_UPDATE_INTERVAL:
+                news_task()
+                last_news_update = time.time()
+            if time.time() - last_hourly_summary > 3600:
+                hourly_summary()
+                last_hourly_summary = time.time()
+            session_alert()
+            time.sleep(PRICE_UPDATE_INTERVAL)
+        except Exception as e:
+            print(f"Main loop error: {e}")
+            time.sleep(60)
